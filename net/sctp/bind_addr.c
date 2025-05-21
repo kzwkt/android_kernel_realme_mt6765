@@ -312,6 +312,12 @@ out_err:
 		sctp_bind_addr_clean(bp);
 
 	return retval;
+
+out_err:
+	if (retval)
+		sctp_bind_addr_clean(bp);
+
+	return retval;
 }
 
 /********************************************************************
