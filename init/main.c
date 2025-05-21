@@ -12,10 +12,8 @@
 #define DEBUG		/* Enable initcall_debug */
 
 #include <linux/types.h>
-#include <linux/extable.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
-#include <linux/binfmts.h>
 #include <linux/kernel.h>
 #include <linux/syscalls.h>
 #include <linux/stackprotector.h>
@@ -27,8 +25,7 @@
 #include <linux/initrd.h>
 #include <linux/bootmem.h>
 #include <linux/acpi.h>
-#include <linux/console.h>
-#include <linux/nmi.h>
+#include <linux/tty.h>
 #include <linux/percpu.h>
 #include <linux/kmod.h>
 #include <linux/vmalloc.h>
@@ -46,12 +43,10 @@
 #include <linux/cgroup.h>
 #include <linux/efi.h>
 #include <linux/tick.h>
-#include <linux/sched/isolation.h>
 #include <linux/interrupt.h>
 #include <linux/taskstats_kern.h>
 #include <linux/delayacct.h>
 #include <linux/unistd.h>
-#include <linux/utsname.h>
 #include <linux/rmap.h>
 #include <linux/mempolicy.h>
 #include <linux/key.h>
@@ -65,50 +60,55 @@
 #include <linux/device.h>
 #include <linux/kthread.h>
 #include <linux/sched.h>
-#include <linux/sched/init.h>
 #include <linux/signal.h>
 #include <linux/idr.h>
 #include <linux/kgdb.h>
 #include <linux/ftrace.h>
 #include <linux/async.h>
+#include <linux/kmemcheck.h>
 #include <linux/sfi.h>
 #include <linux/shmem_fs.h>
 #include <linux/slab.h>
 #include <linux/perf_event.h>
 #include <linux/ptrace.h>
-#include <linux/pti.h>
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
-#include <linux/sched/clock.h>
-#include <linux/sched/task.h>
-#include <linux/sched/task_stack.h>
+#include <linux/sched_clock.h>
 #include <linux/context_tracking.h>
 #include <linux/random.h>
 #include <linux/list.h>
 #include <linux/integrity.h>
 #include <linux/proc_ns.h>
 #include <linux/io.h>
+#include <linux/kaiser.h>
 #include <linux/cache.h>
-#include <linux/rodata_test.h>
-#include <linux/jump_label.h>
-#include <linux/bootprof.h>
 
 #include <asm/io.h>
+#include <asm/bugs.h>
 #include <asm/setup.h>
 #include <asm/sections.h>
 #include <asm/cacheflush.h>
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/initcall.h>
+#ifdef CONFIG_MTK_RAM_CONSOLE
+#include <mt-plat/mtk_ram_console.h>
+#endif
 
-//#ifdef OPLUS_FEATURE_PHOENIX
+#ifdef VENDOR_EDIT
 // Kun.Hu@TECH.BSP.Stability.PHOENIX_PROJECT 2019/06/11, Add for phoenix project
-#include "../drivers/soc/oplus/system/oppo_phoenix/oppo_phoenix.h"
-//#endif  //OPLUS_FEATURE_PHOENIX
+#include "../drivers/soc/oppo/oppo_phoenix/oppo_phoenix.h"
+#endif  //VENDOR_EDIT
+
+#ifdef VENDOR_EDIT
+// Bin.Xu@BSP.Kernel.Stability, 2020/1/2, Add for oppo key handle
+#ifdef CONFIG_OPPO_KEY_HANDLE
+#include <linux/oppo_key_handle.h>
+#endif
+#endif /* VENDOR_EDIT */
 
 static int kernel_init(void *);
 
 extern void init_IRQ(void);
+extern void fork_init(void);
 extern void radix_tree_init(void);
 
 /*
@@ -137,7 +137,6 @@ void (*__initdata late_time_init)(void);
 char __initdata boot_command_line[COMMAND_LINE_SIZE];
 /* Untouched saved command line (eg. for /proc) */
 char *saved_command_line;
-EXPORT_SYMBOL_GPL(saved_command_line);
 /* Command line for parameter parsing */
 static char *static_command_line;
 /* Command line for per-initcall parameter parsing */
@@ -400,7 +399,6 @@ static __initdata DECLARE_COMPLETION(kthreadd_done);
 
 static noinline void __ref rest_init(void)
 {
-	struct task_struct *tsk;
 	int pid;
 
 	rcu_scheduler_starting();
@@ -409,38 +407,19 @@ static noinline void __ref rest_init(void)
 	 * the init task will end up wanting to create kthreads, which, if
 	 * we schedule it before we create kthreadd, will OOPS.
 	 */
-	pid = kernel_thread(kernel_init, NULL, CLONE_FS);
-	/*
-	 * Pin init on the boot CPU. Task migration is not properly working
-	 * until sched_init_smp() has been run. It will set the allowed
-	 * CPUs for init to the non isolated CPUs.
-	 */
-	rcu_read_lock();
-	tsk = find_task_by_pid_ns(pid, &init_pid_ns);
-	set_cpus_allowed_ptr(tsk, cpumask_of(smp_processor_id()));
-	rcu_read_unlock();
-
+	kernel_thread(kernel_init, NULL, CLONE_FS);
 	numa_default_policy();
 	pid = kernel_thread(kthreadd, NULL, CLONE_FS | CLONE_FILES);
 	rcu_read_lock();
 	kthreadd_task = find_task_by_pid_ns(pid, &init_pid_ns);
 	rcu_read_unlock();
-
-	/*
-	 * Enable might_sleep() and smp_processor_id() checks.
-	 * They cannot be enabled earlier because with CONFIG_PREEMPT=y
-	 * kernel_thread() would trigger might_sleep() splats. With
-	 * CONFIG_PREEMPT_VOLUNTARY=y the init task might have scheduled
-	 * already, but it's stuck on the kthreadd_done completion.
-	 */
-	system_state = SYSTEM_SCHEDULING;
-
 	complete(&kthreadd_done);
 
 	/*
 	 * The boot idle thread must execute schedule()
 	 * at least once to get things moving:
 	 */
+	init_idle_bootup_task(current);
 	schedule_preempt_disabled();
 	/* Call into cpu_idle with preempt disabled */
 	cpu_startup_entry(CPUHP_ONLINE);
@@ -462,6 +441,14 @@ static int __init do_early_param(char *param, char *val,
 		}
 	}
 	/* We accept everything at this stage. */
+#ifdef VENDOR_EDIT
+// Bin.Xu @ BSP.Kernel.Stability, 2019/12/02, Add for oppo_key_handle.
+#ifdef CONFIG_OPPO_KEY_HANDLE
+	if (strcmp(param, "password_base") == 0)
+		get_passwd_base(val);
+#endif
+#endif /* VENDOR_EDIT */
+
 	return 0;
 }
 
@@ -486,8 +473,6 @@ void __init parse_early_param(void)
 	done = 1;
 }
 
-void __init __weak arch_post_acpi_subsys_init(void) { }
-
 void __init __weak smp_setup_processor_id(void)
 {
 }
@@ -497,40 +482,6 @@ void __init __weak thread_stack_cache_init(void)
 {
 }
 #endif
-
-bool initcall_debug;
-core_param(initcall_debug, initcall_debug, bool, 0644);
-
-#ifdef TRACEPOINTS_ENABLED
-static void __init initcall_debug_enable(void);
-#else
-static inline void initcall_debug_enable(void)
-{
-}
-#endif
-
-/* Report memory auto-initialization states for this boot. */
-static void __init report_meminit(void)
-{
-	const char *stack;
-
-	if (IS_ENABLED(CONFIG_INIT_STACK_ALL))
-		stack = "all";
-	else if (IS_ENABLED(CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF_ALL))
-		stack = "byref_all";
-	else if (IS_ENABLED(CONFIG_GCC_PLUGIN_STRUCTLEAK_BYREF))
-		stack = "byref";
-	else if (IS_ENABLED(CONFIG_GCC_PLUGIN_STRUCTLEAK_USER))
-		stack = "__user";
-	else
-		stack = "off";
-
-	pr_info("mem auto-init: stack:%s, heap alloc:%s, heap free:%s\n",
-		stack, want_init_on_alloc(GFP_KERNEL) ? "on" : "off",
-		want_init_on_free() ? "on" : "off");
-	if (want_init_on_free())
-		pr_info("mem auto-init: clearing system memory may take some time...\n");
-}
 
 /*
  * Set up kernel memory allocators
@@ -542,16 +493,13 @@ static void __init mm_init(void)
 	 * bigger than MAX_ORDER unless SPARSEMEM.
 	 */
 	page_ext_init_flatmem();
-	report_meminit();
 	mem_init();
 	kmem_cache_init();
+	percpu_init_late();
 	pgtable_init();
 	vmalloc_init();
 	ioremap_huge_init();
-	/* Should be run before the first non-init thread is created */
-	init_espfix_bsp();
-	/* Should be run after espfix64 is set up. */
-	pti_init();
+	kaiser_init();
 }
 
 asmlinkage __visible void __init start_kernel(void)
@@ -583,7 +531,7 @@ asmlinkage __visible void __init start_kernel(void)
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
 	boot_cpu_hotplug_init();
 
-	build_all_zonelists(NULL);
+	build_all_zonelists(NULL, NULL, false);
 	page_alloc_init();
 
 	pr_notice("Kernel command line: %s\n", boot_command_line);
@@ -603,22 +551,17 @@ asmlinkage __visible void __init start_kernel(void)
 	 * kmem_cache_init()
 	 */
 	setup_log_buf(0);
+	pidhash_init();
 	vfs_caches_init_early();
 	sort_main_extable();
 	trap_init();
 	mm_init();
-	
-	//#ifdef OPLUS_FEATURE_PHOENIX
+
+#ifdef VENDOR_EDIT
 	// Kun.Hu@PSW.TECH.RELIABILTY, 2018/11/15, add for project phoenix(hang oppo)
 	if(phx_set_boot_stage)
 		phx_set_boot_stage(KERNEL_MM_INIT_DONE);
-    //#endif //OPLUS_FEATURE_PHOENIX
-
-	ftrace_init();
-
-	/* trace_printk can be enabled here */
-	early_trace_init();
-
+#endif
 	/*
 	 * Set up the scheduler prior starting any interrupts (such as the
 	 * timer interrupt). Full topology setup happens at smp_init()
@@ -633,13 +576,7 @@ asmlinkage __visible void __init start_kernel(void)
 	if (WARN(!irqs_disabled(),
 		 "Interrupts were enabled *very* early, fixing it\n"))
 		local_irq_disable();
-	radix_tree_init();
-
-	/*
-	 * Set up housekeeping before setting up workqueues to allow the unbound
-	 * workqueue to take non-housekeeping into account.
-	 */
-	housekeeping_init();
+	idr_init_cache();
 
 	/*
 	 * Allow workqueue creation and work item queueing/cancelling
@@ -650,13 +587,11 @@ asmlinkage __visible void __init start_kernel(void)
 
 	rcu_init();
 
-	/* Trace events are available after this */
+	/* trace_printk() and trace points may be used after this */
 	trace_init();
 
-	if (initcall_debug)
-		initcall_debug_enable();
-
 	context_tracking_init();
+	radix_tree_init();
 	/* init some links before init_ISA_irqs() */
 	early_irq_init();
 	init_IRQ();
@@ -666,35 +601,32 @@ asmlinkage __visible void __init start_kernel(void)
 	hrtimers_init();
 	softirq_init();
 	timekeeping_init();
+	time_init();
 
 	/*
 	 * For best initial stack canary entropy, prepare it after:
 	 * - setup_arch() for any UEFI RNG entropy and boot cmdline access
-	 * - timekeeping_init() for ktime entropy used in rand_initialize()
-	 * - rand_initialize() to get any arch-specific entropy like RDRAND
-	 * - add_latent_entropy() to get any latent entropy
-	 * - adding command line entropy
+	 * - timekeeping_init() for ktime entropy used in random_init()
+	 * - time_init() for making random_get_entropy() work on some platforms
+	 * - random_init() to initialize the RNG from from early entropy sources
 	 */
-	rand_initialize();
-	add_latent_entropy();
-	add_device_randomness(command_line, strlen(command_line));
+	random_init(command_line);
 	boot_init_stack_canary();
 
-	time_init();
+	sched_clock_postinit();
+	printk_nmi_init();
 	perf_event_init();
 	profile_init();
 	call_function_init();
 	WARN(!irqs_disabled(), "Interrupts were enabled early\n");
-
 	early_boot_irqs_disabled = false;
 	local_irq_enable();
-    //#ifdef OPLUS_FEATURE_PHOENIX
-    // Kun.Hu@TECH.BSP.Stability.PHOENIX_PROJECT 2019/06/11, Add for phoenix project
-    if(phx_set_boot_stage) {
-        phx_set_boot_stage(KERNEL_LOCAL_IRQ_ENABLE);
-    }
-    //#endif
 
+#ifdef VENDOR_EDIT
+    // Kun.Hu@TECH.BSP.Stability.PHOENIX_PROJECT 2019/06/11, Add for phoenix project
+	if(phx_set_boot_stage)
+		phx_set_boot_stage(KERNEL_LOCAL_IRQ_ENABLE);
+#endif
 	kmem_cache_init_late();
 
 	/*
@@ -707,7 +639,7 @@ asmlinkage __visible void __init start_kernel(void)
 		panic("Too many boot %s vars at `%s'", panic_later,
 		      panic_param);
 
-	lockdep_init();
+	lockdep_info();
 
 	/*
 	 * Need to run this when irqs are enabled, because it wants
@@ -725,29 +657,30 @@ asmlinkage __visible void __init start_kernel(void)
 		initrd_start = 0;
 	}
 #endif
-	kmemleak_init();
+	page_ext_init();
 	debug_objects_mem_init();
+	kmemleak_init();
 	setup_per_cpu_pageset();
 	numa_policy_init();
-	acpi_early_init();
 	if (late_time_init)
 		late_time_init();
 	sched_clock_init();
 	calibrate_delay();
-
-	arch_cpu_finalize_init();
-
-	pid_idr_init();
+	pidmap_init();
 	anon_vma_init();
+	acpi_early_init();
 #ifdef CONFIG_X86
 	if (efi_enabled(EFI_RUNTIME_SERVICES))
 		efi_enter_virtual_mode();
+#endif
+#ifdef CONFIG_X86_ESPFIX64
+	/* Should be run before the first non-init thread is created */
+	init_espfix_bsp();
 #endif
 	thread_stack_cache_init();
 	cred_init();
 	fork_init();
 	proc_caches_init();
-	uts_ns_init();
 	buffer_init();
 	key_init();
 	security_init();
@@ -755,28 +688,29 @@ asmlinkage __visible void __init start_kernel(void)
 	vfs_caches_init();
 	pagecache_init();
 	signals_init();
-	seq_file_init();
 	proc_root_init();
 	nsfs_init();
 	cpuset_init();
 	cgroup_init();
 	taskstats_init_early();
 	delayacct_init();
-    //#ifdef OPLUS_FEATURE_PHOENIX
-    // Kun.Hu@PSW.TECH.RELIABILTY, 2018/11/15, add for project phoenix(hang oppo)
-    if(phx_set_boot_stage) {
-        phx_set_boot_stage(KERNEL_DELAYACCT_INIT_DONE);
-    }
-    //#endif
 
+#ifdef VENDOR_EDIT
+    // Kun.Hu@PSW.TECH.RELIABILTY, 2018/11/15, add for project phoenix(hang oppo)
+	if(phx_set_boot_stage)
+		phx_set_boot_stage(KERNEL_DELAYACCT_INIT_DONE);
+#endif
+	check_bugs();
 
 	acpi_subsystem_init();
-	arch_post_acpi_subsys_init();
 	sfi_init_late();
 
 	if (efi_enabled(EFI_RUNTIME_SERVICES)) {
+		efi_late_init();
 		efi_free_boot_services();
 	}
+
+	ftrace_init();
 
 	/* Do the rest non-__init'ed, we're now alive */
 	rest_init();
@@ -794,6 +728,9 @@ static void __init do_ctors(void)
 		(*fn)();
 #endif
 }
+
+bool initcall_debug;
+core_param(initcall_debug, initcall_debug, bool, 0644);
 
 #ifdef CONFIG_KALLSYMS
 struct blacklist_entry {
@@ -864,79 +801,51 @@ static bool __init_or_module initcall_blacklisted(initcall_t fn)
 #endif
 __setup("initcall_blacklist=", initcall_blacklist);
 
-static __init_or_module void
-trace_initcall_start_cb(void *data, initcall_t fn)
+static int __init_or_module do_one_initcall_debug(initcall_t fn)
 {
-	ktime_t *calltime = (ktime_t *)data;
+	ktime_t calltime, delta, rettime;
+	unsigned long long duration;
+	int ret;
 
 	printk(KERN_DEBUG "calling  %pF @ %i\n", fn, task_pid_nr(current));
-	*calltime = ktime_get();
-}
-
-static __init_or_module void
-trace_initcall_finish_cb(void *data, initcall_t fn, int ret)
-{
-	ktime_t *calltime = (ktime_t *)data;
-	ktime_t delta, rettime;
-	unsigned long long duration;
-
+	calltime = ktime_get();
+	ret = fn();
 	rettime = ktime_get();
-	delta = ktime_sub(rettime, *calltime);
+	delta = ktime_sub(rettime, calltime);
 	duration = (unsigned long long) ktime_to_ns(delta) >> 10;
 	printk(KERN_DEBUG "initcall %pF returned %d after %lld usecs\n",
 		 fn, ret, duration);
+
+	return ret;
 }
-
-static ktime_t initcall_calltime;
-
-#ifdef TRACEPOINTS_ENABLED
-static void __init initcall_debug_enable(void)
-{
-	int ret;
-
-	ret = register_trace_initcall_start(trace_initcall_start_cb,
-					    &initcall_calltime);
-	ret |= register_trace_initcall_finish(trace_initcall_finish_cb,
-					      &initcall_calltime);
-	WARN(ret, "Failed to register initcall tracepoints\n");
-}
-# define do_trace_initcall_start	trace_initcall_start
-# define do_trace_initcall_finish	trace_initcall_finish
+#ifdef CONFIG_MTPROF
+#include <bootprof.h>
 #else
-static inline void do_trace_initcall_start(initcall_t fn)
-{
-	if (!initcall_debug)
-		return;
-	trace_initcall_start_cb(&initcall_calltime, fn);
-}
-static inline void do_trace_initcall_finish(initcall_t fn, int ret)
-{
-	if (!initcall_debug)
-		return;
-	trace_initcall_finish_cb(&initcall_calltime, fn, ret);
-}
-#endif /* !TRACEPOINTS_ENABLED */
-
+#define TIME_LOG_START()
+#define TIME_LOG_END()
+#define bootprof_initcall(fn, ts)
+#endif
 
 int __init_or_module do_one_initcall(initcall_t fn)
 {
 	int count = preempt_count();
-	char msgbuf[64];
 	int ret;
+	char msgbuf[64];
 #ifdef CONFIG_MTPROF
-	unsigned long long ts;
+	unsigned long long ts = 0;
 #endif
-
 	if (initcall_blacklisted(fn))
 		return -EPERM;
 
-	do_trace_initcall_start(fn);
-	BOOTPROF_TIME_LOG_START(ts);
-	ret = fn();
-	BOOTPROF_TIME_LOG_END(ts);
-	bootprof_initcall(fn, ts);
-	do_trace_initcall_finish(fn, ret);
-
+#ifdef CONFIG_MTK_RAM_CONSOLE
+	aee_rr_rec_last_init_func((unsigned long)fn);
+#endif
+	TIME_LOG_START();
+	if (initcall_debug)
+		ret = do_one_initcall_debug(fn);
+	else
+		ret = fn();
+	TIME_LOG_END();
 	msgbuf[0] = 0;
 
 	if (preempt_count() != count) {
@@ -950,22 +859,23 @@ int __init_or_module do_one_initcall(initcall_t fn)
 	WARN(msgbuf[0], "initcall %pF returned with %s\n", fn, msgbuf);
 
 	add_latent_entropy();
+	bootprof_initcall(fn, ts);
 	return ret;
 }
 
 
-extern initcall_entry_t __initcall_start[];
-extern initcall_entry_t __initcall0_start[];
-extern initcall_entry_t __initcall1_start[];
-extern initcall_entry_t __initcall2_start[];
-extern initcall_entry_t __initcall3_start[];
-extern initcall_entry_t __initcall4_start[];
-extern initcall_entry_t __initcall5_start[];
-extern initcall_entry_t __initcall6_start[];
-extern initcall_entry_t __initcall7_start[];
-extern initcall_entry_t __initcall_end[];
+extern initcall_t __initcall_start[];
+extern initcall_t __initcall0_start[];
+extern initcall_t __initcall1_start[];
+extern initcall_t __initcall2_start[];
+extern initcall_t __initcall3_start[];
+extern initcall_t __initcall4_start[];
+extern initcall_t __initcall5_start[];
+extern initcall_t __initcall6_start[];
+extern initcall_t __initcall7_start[];
+extern initcall_t __initcall_end[];
 
-static initcall_entry_t *initcall_levels[] __initdata = {
+static initcall_t *initcall_levels[] __initdata = {
 	__initcall0_start,
 	__initcall1_start,
 	__initcall2_start,
@@ -979,7 +889,7 @@ static initcall_entry_t *initcall_levels[] __initdata = {
 
 /* Keep these in sync with initcalls in include/linux/init.h */
 static char *initcall_level_names[] __initdata = {
-	"pure",
+	"early",
 	"core",
 	"postcore",
 	"arch",
@@ -991,7 +901,7 @@ static char *initcall_level_names[] __initdata = {
 
 static void __init do_initcall_level(int level)
 {
-	initcall_entry_t *fn;
+	initcall_t *fn;
 
 	strcpy(initcall_command_line, saved_command_line);
 	parse_args(initcall_level_names[level],
@@ -1000,17 +910,30 @@ static void __init do_initcall_level(int level)
 		   level, level,
 		   NULL, &repair_env_string);
 
-	trace_initcall_level(initcall_level_names[level]);
 	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++)
-		do_one_initcall(initcall_from_entry(fn));
+		do_one_initcall(*fn);
 }
 
+#ifdef VENDOR_EDIT
+//cuixiaogang@SRC.hypnus.2019-1-3. add for hypnusd
+extern int __init hypnus_init(void);
+#endif /* VENDOR_EDIT */
 static void __init do_initcalls(void)
 {
 	int level;
 
 	for (level = 0; level < ARRAY_SIZE(initcall_levels) - 1; level++)
 		do_initcall_level(level);
+#ifdef CONFIG_MTK_RAM_CONSOLE
+	aee_rr_rec_last_init_func(~(unsigned long)(0));
+#endif
+
+#ifdef VENDOR_EDIT
+    //cuixiaogang@SRC.hypnus.2019-1-3. add for hypnusd
+#ifdef CONFIG_OPPO_HYPNUS
+    hypnus_init();
+#endif
+#endif /* VENDOR_EDIT */
 }
 
 /*
@@ -1025,30 +948,28 @@ static void __init do_basic_setup(void)
 	cpuset_init_smp();
 	shmem_init();
 	driver_init();
-    //#ifdef OPLUS_FEATURE_PHOENIX
+#ifdef VENDOR_EDIT
     // Kun.Hu@TECH.BSP.Stability.PHOENIX_PROJECT 2019/06/11, Add for phoenix project
-    if(phx_set_boot_stage) {
-        phx_set_boot_stage(KERNEL_DRIVER_INIT_DONE);
-    }
-    //#endif
+	if(phx_set_boot_stage)
+		phx_set_boot_stage(KERNEL_DRIVER_INIT_DONE);
+#endif
 	init_irq_proc();
 	do_ctors();
 	usermodehelper_enable();
 	do_initcalls();
-    //#ifdef OPLUS_FEATURE_PHOENIX
+#ifdef VENDOR_EDIT
     // Kun.Hu@TECH.BSP.Stability.PHOENIX_PROJECT 2019/06/11, Add for phoenix project
-    if(phx_set_boot_stage)
-        phx_set_boot_stage(KERNEL_DO_INITCALLS_DONE);
-    //#endif
+	if(phx_set_boot_stage)
+		phx_set_boot_stage(KERNEL_DO_INITCALLS_DONE);
+#endif
 }
 
 static void __init do_pre_smp_initcalls(void)
 {
-	initcall_entry_t *fn;
+	initcall_t *fn;
 
-	trace_initcall_level("early");
 	for (fn = __initcall_start; fn < __initcall0_start; fn++)
-		do_one_initcall(initcall_from_entry(fn));
+		do_one_initcall(*fn);
 }
 
 /*
@@ -1065,7 +986,6 @@ void __init load_default_modules(void)
 static int run_init_process(const char *init_filename)
 {
 	argv_init[0] = init_filename;
-	pr_info("Run %s as init process\n", init_filename);
 	return do_execve(getname_kernel(init_filename),
 		(const char __user *const __user *)argv_init,
 		(const char __user *const __user *)envp_init);
@@ -1087,7 +1007,7 @@ static int try_to_run_init_process(const char *init_filename)
 
 static noinline void __init kernel_init_freeable(void);
 
-#if defined(CONFIG_STRICT_KERNEL_RWX) || defined(CONFIG_STRICT_MODULE_RWX)
+#if defined(CONFIG_DEBUG_RODATA) || defined(CONFIG_DEBUG_SET_MODULE_RONX)
 bool rodata_enabled __ro_after_init = true;
 static int __init set_debug_rodata(char *str)
 {
@@ -1098,20 +1018,12 @@ static int __init set_debug_rodata(char *str)
 __setup("rodata=", set_debug_rodata);
 #endif
 
-#ifdef CONFIG_STRICT_KERNEL_RWX
+#ifdef CONFIG_DEBUG_RODATA
 static void mark_readonly(void)
 {
-	if (rodata_enabled) {
-		/*
-		 * load_module() results in W+X mappings, which are cleaned up
-		 * with call_rcu_sched().  Let's make sure that queued work is
-		 * flushed so that we don't hit false positives looking for
-		 * insecure pages which are W+X.
-		 */
-		rcu_barrier_sched();
+	if (rodata_enabled)
 		mark_rodata_ro();
-		rodata_test();
-	} else
+	else
 		pr_info("Kernel memory protection disabled.\n");
 }
 #else
@@ -1128,31 +1040,21 @@ static int __ref kernel_init(void *unused)
 	kernel_init_freeable();
 	/* need to finish all async __init code before freeing the memory */
 	async_synchronize_full();
-	ftrace_free_init_mem();
-	jump_label_invalidate_initmem();
 	free_initmem();
 	mark_readonly();
-
-	/*
-	 * Kernel mappings are now finalized - update the userspace page-table
-	 * to finalize PTI.
-	 */
-	pti_finalize();
-
 	system_state = SYSTEM_RUNNING;
 	numa_default_policy();
 
 	rcu_end_inkernel_boot();
-	
-    //#ifdef OPLUS_FEATURE_PHOENIX
-    // Kun.Hu@TECH.BSP.Stability.PHOENIX_PROJECT 2019/06/11, Add for phoenix project
-    if(phx_set_boot_stage) {
-        phx_set_boot_stage(KERNEL_INIT_DONE);
-    }
-    //#endif
+#ifdef CONFIG_MTPROF
+	log_boot("Kernel_init_done");
+#endif
 
-	bootprof_log_boot("Kernel_init_done");
-
+#ifdef VENDOR_EDIT
+        // Kun.Hu@TECH.BSP.Stability.PHOENIX_PROJECT 2019/06/11, Add for phoenix project
+	if(phx_set_boot_stage)
+		phx_set_boot_stage(KERNEL_INIT_DONE);
+#endif
 	if (ramdisk_execute_command) {
 		ret = run_init_process(ramdisk_execute_command);
 		if (!ret)
@@ -1181,7 +1083,7 @@ static int __ref kernel_init(void *unused)
 		return 0;
 
 	panic("No working init found.  Try passing init= option to kernel. "
-	      "See Linux Documentation/admin-guide/init.rst for guidance.");
+	      "See Linux Documentation/init.txt for guidance.");
 }
 
 static noinline void __init kernel_init_freeable(void)
@@ -1198,14 +1100,16 @@ static noinline void __init kernel_init_freeable(void)
 	 * init can allocate pages on any node
 	 */
 	set_mems_allowed(node_states[N_MEMORY]);
+	/*
+	 * init can run on any cpu.
+	 */
+	set_cpus_allowed_ptr(current, cpu_all_mask);
 
 	cad_pid = get_pid(task_pid(current));
 
 	smp_prepare_cpus(setup_max_cpus);
 
 	workqueue_init();
-
-	init_mm_internals();
 
 	do_pre_smp_initcalls();
 	lockup_detector_init();
@@ -1214,24 +1118,20 @@ static noinline void __init kernel_init_freeable(void)
 	sched_init_smp();
 
 	page_alloc_init_late();
-	/* Initialize page ext after all struct pages are initialized. */
-	page_ext_init();
 
 	do_basic_setup();
 
-    //#ifdef OPLUS_FEATURE_PHOENIX
+#ifdef VENDOR_EDIT
     // Kun.Hu@TECH.BSP.Stability.PHOENIX_PROJECT 2019/06/11, Add for phoenix project
-    if(phx_set_boot_stage) {
-        phx_set_boot_stage(KERNEL_DO_BASIC_SETUP_DONE);
-    }
-    //#endif
-
+	if(phx_set_boot_stage)
+		phx_set_boot_stage(KERNEL_DO_BASIC_SETUP_DONE);
+#endif
 	/* Open the /dev/console on the rootfs, this should never fail */
-	if (ksys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
+	if (sys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
 		pr_err("Warning: unable to open an initial console.\n");
 
-	(void) ksys_dup(0);
-	(void) ksys_dup(0);
+	(void) sys_dup(0);
+	(void) sys_dup(0);
 	/*
 	 * check if there is an early userspace init.  If yes, let it do all
 	 * the work
@@ -1240,8 +1140,7 @@ static noinline void __init kernel_init_freeable(void)
 	if (!ramdisk_execute_command)
 		ramdisk_execute_command = "/init";
 
-	if (ksys_access((const char __user *)
-			ramdisk_execute_command, 0) != 0) {
+	if (sys_access((const char __user *) ramdisk_execute_command, 0) != 0) {
 		ramdisk_execute_command = NULL;
 		prepare_namespace();
 	}

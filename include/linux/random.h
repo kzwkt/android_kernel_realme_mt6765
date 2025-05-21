@@ -18,17 +18,15 @@ void add_input_randomness(unsigned int type, unsigned int code,
 			  unsigned int value) __latent_entropy;
 void add_interrupt_randomness(int irq) __latent_entropy;
 void add_hwgenerator_randomness(const void *buf, size_t len, size_t entropy);
-extern void add_bootloader_randomness(const void *, unsigned int);
 
-
+#if defined(LATENT_ENTROPY_PLUGIN) && !defined(__CHECKER__)
 static inline void add_latent_entropy(void)
 {
-#if defined(LATENT_ENTROPY_PLUGIN) && !defined(__CHECKER__)
-add_device_randomness((const void *)&latent_entropy, sizeof(latent_entropy));
-#else
-add_device_randomness(NULL, 0);
-#endif
+	add_device_randomness((const void *)&latent_entropy, sizeof(latent_entropy));
 }
+#else
+static inline void add_latent_entropy(void) { }
+#endif
 
 void get_random_bytes(void *buf, size_t len);
 size_t __must_check get_random_bytes_arch(void *buf, size_t len);
@@ -45,25 +43,6 @@ static inline unsigned long get_random_long(void)
 #else
 	return get_random_u32();
 #endif
-}
-
-/*
- * On 64-bit architectures, protect against non-terminated C string overflows
- * by zeroing out the first byte of the canary; this leaves 56 bits of entropy.
- */
-#ifdef CONFIG_64BIT
-# ifdef __LITTLE_ENDIAN
-#  define CANARY_MASK 0xffffffffffffff00UL
-# else /* big endian, 64 bits: */
-#  define CANARY_MASK 0x00ffffffffffffffUL
-# endif
-#else /* 32 bits: */
-# define CANARY_MASK 0xffffffffUL
-#endif
-
-static inline unsigned long get_random_canary(void)
-{
-	return get_random_long() & CANARY_MASK;
 }
 
 int __init random_init(const char *command_line);
@@ -117,18 +96,18 @@ static inline bool __must_check arch_get_random_seed_int(unsigned int *v) { retu
  */
 #ifndef arch_get_random_seed_long_early
 static inline bool __init arch_get_random_seed_long_early(unsigned long *v)
- {
+{
 	WARN_ON(system_state != SYSTEM_BOOTING);
 	return arch_get_random_seed_long(v);
- }
+}
 #endif
 
 #ifndef arch_get_random_long_early
 static inline bool __init arch_get_random_long_early(unsigned long *v)
- {
+{
 	WARN_ON(system_state != SYSTEM_BOOTING);
 	return arch_get_random_long(v);
- }
+}
 #endif
 
 #ifdef CONFIG_SMP
