@@ -289,6 +289,8 @@ obj-$(CONFIG_GENERIC_LIB_MULDI3) += muldi3.o
 obj-$(CONFIG_GENERIC_LIB_CMPDI2) += cmpdi2.o
 obj-$(CONFIG_GENERIC_LIB_UCMPDI2) += ucmpdi2.o
 
+obj-y += crypto/
+
 # ifdef OPLUS_FEATURE_MEMLEAK_DETECT
 # /* Kui.Zhang@BSP.Kernel.MM, 2020-06-01, add memleak detect stack depot */
 obj-$(CONFIG_VMALLOC_DEBUG) += memleak_debug_stackdepot.o
