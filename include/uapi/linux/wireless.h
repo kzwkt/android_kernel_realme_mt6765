@@ -76,6 +76,8 @@
 
 #include <stddef.h>                     /* for offsetof */
 
+#include <stddef.h>                     /* for offsetof */
+
 /***************************** VERSION *****************************/
 /*
  * This constant is used to know the availability of the wireless
