@@ -524,7 +524,7 @@ struct utp_task_req_desc {
 	struct utp_upiu_header	rsp_header;
 	__be32			output_param1;
 	__be32			output_param2;
-	__be32			__reserved2[3];
+	__be32			__reserved2[3];	
 };
 
 #endif /* End of Header */
